@@ -207,9 +207,8 @@ enum {
 #define ISTACTICAL(m)           (ISCAPTURE(m)||ISENPASSANT(m)||ISPROMOTION(m))
 #define NOMOVE                  0
 
-/* The maximum number of chess moves that can occur in a game */
-#define MAX_MOVES 250
-#define MAX_CAPTURES 80
+/* The maximum number of legal moves for a chess moves position */
+#define MAX_MOVES 256
 
 /* The maximum size of the game history */
 #define MAX_HISTORY_SIZE 2048
@@ -269,7 +268,7 @@ struct moveselector {
     /* Counter move for this position */
     uint32_t counter;
     /* Additional information for the availables moves */
-    struct moveinfo moveinfo[MAX_MOVES+MAX_CAPTURES];
+    struct moveinfo moveinfo[MAX_MOVES];
     /* Index of the last move plus one */
     int last_idx;
     /* The number of bad tactical moves */
@@ -399,7 +398,7 @@ struct position {
      * Location of each piece on the board. An
      * empty square is identified NO_PIECE.
      */
-    int pieces[NSQUARES];
+    uint8_t pieces[NSQUARES];
     /* Bitboards for the different pieces */
     uint64_t bb_pieces[NPIECES];
     /* Bitboards for the pieces of the different sides */
@@ -434,6 +433,11 @@ struct position {
     /* Pointers to the owning worker and the active game state */
     struct search_worker *worker;
     struct gamestate *state;
+
+    /* NNUE data */
+    uint8_t start_pieces[NSQUARES];
+    int start_side;
+    void *nnue_pos;
 };
 
 /* Per-thread worker instance */
@@ -442,8 +446,6 @@ struct search_worker {
     int id;
     /* The current position */
     struct position pos;
-    /* Move selector struct for each ply in the search tree */
-    struct moveselector ppms[MAX_PLY];
     /*
      * Parameter used during the search to keep track of the current
      * principle variation at a certain depth. After the search the

@@ -62,8 +62,6 @@ static int mvvlva_table[NPIECES][NPIECES] = {
 
 static int mvvlva(struct position *pos, uint32_t move)
 {
-    assert(ISCAPTURE(move) || ISENPASSANT(move));
-
     if (ISCAPTURE(move)) {
         return mvvlva_table[pos->pieces[TO(move)]][pos->pieces[FROM(move)]];
     } else if (ISENPASSANT(move)) {
@@ -72,46 +70,48 @@ static int mvvlva(struct position *pos, uint32_t move)
     return 0;
 }
 
-static void add_move(struct search_worker *worker, struct moveselector *ms,
-                     struct movelist *list, int iter)
+static void add_moves(struct search_worker *worker, struct moveselector *ms,
+                      struct movelist *list)
 {
     uint32_t        move;
     struct moveinfo *info;
-    struct position *pos;
+    struct position *pos = &worker->pos;
+    int             k;
 
-    pos = &worker->pos;
+    for (k=0;k<list->size;k++) {
+        move = list->moves[k];
 
-    /*
-     * Moves in the transposition table, killer moves and counter moves
-     * are handled separately and should not be considered here.
-     */
-    move = list->moves[iter];
-    if ((move == ms->ttmove) ||
-        (move == ms->killer) ||
-        (move == ms->counter)) {
-        return;
-    }
+        /*
+         * Moves in the transposition table, killer moves and counter moves
+         * are handled separately and should not be considered here.
+         */
+        if ((move == ms->ttmove) ||
+            (move == ms->killer) ||
+            (move == ms->counter)) {
+            continue;
+        }
 
-    /*
-     * If the SEE score is positive (normal moves or good captures) then
-     * the move is added to the moveinfo list. If the SEE score is
-     * negative (bad captures) then the move is added to be bad tacticals
-     * list.
-     */
-    if (ISTACTICAL(move) && !see_ge(pos, move, 0)) {
-        info = &ms->moveinfo[MAX_MOVES+ms->nbadtacticals];
-        ms->nbadtacticals++;
-    } else {
-        info = &ms->moveinfo[ms->last_idx];
-        ms->last_idx++;
-    }
-    info->move = move;
+        /*
+         * If the SEE score is positive (normal moves or good captures) then
+         * the move is added to the moveinfo list. If the SEE score is
+         * negative (bad captures) then the move is added to be bad tacticals
+         * list.
+         */
+        if (ISTACTICAL(move) && !see_ge(pos, move, 0)) {
+            info = &ms->moveinfo[MAX_MOVES-1-ms->nbadtacticals];
+            ms->nbadtacticals++;
+        } else {
+            info = &ms->moveinfo[ms->last_idx];
+            ms->last_idx++;
+        }
+        info->move = move;
 
-    /* Assign a score to the move */
-    if (ISTACTICAL(move)) {
-        info->score = mvvlva(pos, move);
-    } else {
-        info->score = history_get_score(worker, move);
+        /* Assign a score to the move */
+        if (ISTACTICAL(move)) {
+            info->score = mvvlva(pos, move);
+        } else {
+            info->score = history_get_score(worker, move);
+        }
     }
 }
 
@@ -154,17 +154,13 @@ static uint32_t select_move(struct moveselector *ms)
     return ms->moveinfo[start].move;
 }
 
-static bool get_move(struct search_worker *worker, uint32_t *move)
+static bool get_move(struct moveselector *ms, struct search_worker *worker,
+                     uint32_t *move)
 {
-    struct moveselector *ms;
-    struct movelist     list;
-    uint32_t            killer;
-    uint32_t            counter;
-    int                 k;
-    struct position     *pos;
-
-    pos = &worker->pos;
-    ms = &worker->ppms[pos->sply];
+    struct movelist list;
+    uint32_t        killer;
+    uint32_t        counter;
+    struct position *pos = &worker->pos;
 
     switch (ms->phase) {
     case PHASE_TT:
@@ -183,9 +179,7 @@ static bool get_move(struct search_worker *worker, uint32_t *move)
             gen_capture_moves(pos, &list);
             gen_promotion_moves(pos, &list, ms->underpromote);
         }
-        for (k=0;k<list.size;k++) {
-            add_move(worker, ms, &list, k);
-        }
+        add_moves(worker, ms, &list);
         ms->phase++;
         ms->idx = 0;
         /* Fall through */
@@ -225,9 +219,7 @@ static bool get_move(struct search_worker *worker, uint32_t *move)
         } else {
             gen_quiet_moves(pos, &list);
         }
-        for (k=0;k<list.size;k++) {
-            add_move(worker, ms, &list, k);
-        }
+        add_moves(worker, ms, &list);
         ms->phase++;
         /* Fall through */
     case PHASE_MOVES:
@@ -237,8 +229,8 @@ static bool get_move(struct search_worker *worker, uint32_t *move)
         ms->phase++;
         /* Fall through */
     case PHASE_ADD_BAD_TACTICAL:
-        ms->last_idx = MAX_MOVES + ms->nbadtacticals;
-        ms->idx = MAX_MOVES;
+        ms->last_idx = MAX_MOVES;
+        ms->idx = MAX_MOVES - ms->nbadtacticals;
         ms->phase++;
         /* Fall through */
     case PHASE_BAD_TACTICAL:
@@ -260,20 +252,17 @@ static bool get_move(struct search_worker *worker, uint32_t *move)
     return *move != NOMOVE;
 }
 
-void select_init_node(struct search_worker *worker, bool tactical_only,
-                      bool in_check, uint32_t ttmove)
+void select_init_node(struct moveselector *ms, struct search_worker *worker,
+                      bool tactical_only, bool in_check, uint32_t ttmove)
 {
-    struct moveselector *ms;
-    struct position     *pos;
+    struct position *pos = &worker->pos;
 
-    pos = &worker->pos;
-    ms = &worker->ppms[pos->sply];
     ms->phase = PHASE_TT;
     ms->tactical_only = tactical_only;
     ms->underpromote = !tactical_only;
     if ((ttmove == NOMOVE) || !board_is_move_pseudo_legal(pos, ttmove)) {
         ms->ttmove = NOMOVE;
-    } else if (ms->tactical_only && !in_check && !ISTACTICAL(ms->ttmove)) {
+    } else if (tactical_only && !in_check && !ISTACTICAL(ttmove)) {
         ms->ttmove = NOMOVE;
     } else {
         ms->ttmove = ttmove;
@@ -286,20 +275,15 @@ void select_init_node(struct search_worker *worker, bool tactical_only,
     ms->counter = counter_get_move(worker);
 }
 
-bool select_get_move(struct search_worker *worker, uint32_t *move)
+bool select_get_move(struct moveselector *ms, struct search_worker *worker,
+                     uint32_t *move)
 {
     assert(move != NULL);
 
-    return get_move(worker, move);
+    return get_move(ms, worker, move);
 }
 
-bool select_is_bad_capture_phase(struct search_worker *worker)
+bool select_is_bad_capture_phase(struct moveselector *ms)
 {
-    struct moveselector *ms;
-    struct position     *pos;
-
-    pos = &worker->pos;
-    ms = &worker->ppms[pos->sply];
-
     return ms->phase == PHASE_BAD_TACTICAL;
 }
